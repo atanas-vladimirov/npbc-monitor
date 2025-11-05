@@ -30,7 +30,6 @@ define("db_user", default="npbc_user", help="PostgreSQL database user")
 define("db_password", default="mTKgIi0HCCTiUKF", help="PostgreSQL database password")
 define("init_db", default=False, help="Initialize the database schema", type=bool)
 
-
 # --- Database Utilities ---
 
 def get_db_connection():
@@ -109,10 +108,7 @@ class LogDataHandler(BaseHandler):
     def post(self):
         try:
             data = tornado.escape.json_decode(self.request.body)
-            #print("--- The data ---")
-            #print(data)            
 
-            # Map TINYINT (0/1) from original data to BOOLEAN for PostgreSQL
             params = [
                 datetime.now(), data["SwVer"], data["Date"], data["Mode"], data["State"], data["Status"],
                 bool(data["IgnitionFail"]), bool(data["PelletJam"]), data["Tset"], data["Tboiler"],
@@ -121,8 +117,6 @@ class LogDataHandler(BaseHandler):
                 bool(data["ThermostatStop"]), data["FFWorkTime"], data["TDS18"], data["TBMP"],
                 data["PBMP"], data["KTYPE"]
             ]
-            #print("--- The params --- ")
-            #print(params)
 
             query = """
                 INSERT INTO "BurnerLogs" (
@@ -245,13 +239,23 @@ class GetConsumptionByMonthHandler(BaseHandler):
 
 class GetConsumptionStatsHandler(BaseHandler):
     def get(self):
+        try:
+            # Get the 'timestamp' argument from the URL (e.g., ?timestamp=1678886400)
+            timestamp_sec = int(self.get_argument('timestamp'))
+        except (ValueError, TypeError, tornado.web.MissingArgumentError):
+            # Fallback to 24 hours ago if the parameter is missing or invalid
+            timestamp_sec = int((datetime.now() - datetime.timedelta(hours=24)).timestamp())
+
+        start_time = datetime.fromtimestamp(timestamp_sec)
+
+        # We replace the hard-coded '24 hours' with a placeholder (%s)
         query = """
             SELECT
                 to_char(hour_bucket, 'YYYY-MM-DD"T"HH24:MI:SS') as "Timestamp",
                 COALESCE(SUM(bl."FFWorkTime"), 0) as "FFWorkTime"
             FROM
                 generate_series(
-                    date_trunc('hour', NOW() - interval '24 hours'),
+                    date_trunc('hour', %s::timestamp),  -- <-- CHANGED: Use the placeholder
                     date_trunc('hour', NOW()),
                     '1 hour'
                 ) AS hour_bucket
@@ -260,9 +264,10 @@ class GetConsumptionStatsHandler(BaseHandler):
             GROUP BY hour_bucket
             ORDER BY hour_bucket;
         """
+
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(query)
+            cur.execute(query, (start_time,))
             result = [dict(row) for row in cur.fetchall()]
         conn.close()
         self.write(json.dumps(result, default=str))
@@ -313,5 +318,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
