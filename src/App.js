@@ -74,6 +74,8 @@ const App = () => {
             setApiError(false);
             setErrorMessage('');
             const timestampAgo = Math.floor(Date.now() / 1000) - (timeRange * 60 * 60);
+            // ADDED: Cache-busting parameter
+            const cacheBust = `&_cb=${Date.now()}`;
 
             const [
                 info,
@@ -81,19 +83,21 @@ const App = () => {
                 consumption,
                 monthlyConsumption
             ] = await Promise.all([
-                fetchDataWithRetry('api/getInfo'),
-                fetchDataWithRetry(`api/getStats?timestamp=${timestampAgo}`),
-                fetchDataWithRetry(`api/getConsumptionStats?timestamp=${timestampAgo}`),
-                fetchDataWithRetry('api/getConsumptionByMonth')
+                // CORRECTED: Added cache-busting parameter
+                fetchDataWithRetry(`api/getInfo?_cb=${cacheBust}`),
+                fetchDataWithRetry(`api/getStats?timestamp=${timestampAgo}${cacheBust}`),
+                fetchDataWithRetry(`api/getConsumptionStats?timestamp=${timestampAgo}${cacheBust}`),
+                fetchDataWithRetry(`api/getConsumptionByMonth?_cb=${cacheBust}`)
             ]);
             
             if (info && info.length > 0) {
                 setCurrentInfo(info[0]);
             }
 
+            // CORRECTED: Show day/month for ranges > 12 hours to ensure unique labels
             const localeOptions = {
-                day: timeRange > 24 ? 'numeric' : undefined,
-                month: timeRange > 24 ? 'numeric' : undefined,
+                day: timeRange > 12 ? 'numeric' : undefined,
+                month: timeRange > 12 ? 'numeric' : undefined,
                 hour: '2-digit',
                 minute: '2-digit',
                 hour12: false,
@@ -110,15 +114,15 @@ const App = () => {
                 tOutside: item.TBMP,
                 flame: item.Flame,
                 power: Math.max(0, item.Power - 1),
-            })) || [];
+            })).sort((a, b) => a.date - b.date) || []; // CORRECTED: Sort data chronologically
             
             const mappedConsumption = consumption?.map(item => ({
                 date: new Date(item.Timestamp).getTime(),
                 formattedDate: new Date(item.Timestamp).toLocaleString('en-GB', localeOptions),
                 consumption: Math.round(item.FFWorkTime * feedTime * 100) / 100
-            })) || [];
+            })).sort((a, b) => a.date - b.date) || []; // CORRECTED: Sort data chronologically
 
-            // Calculate the sum of all consumption values for the period
+            // CORRECTED: Calculate the sum of all consumption values for the period
             const totalConsumptionCalc = mappedConsumption.reduce((acc, cur) => acc + cur.consumption, 0);
             
             const mappedMonthly = monthlyConsumption?.map(item => {
@@ -137,7 +141,7 @@ const App = () => {
             setStatsData(mappedStats);
             setConsumptionData(mappedConsumption);
             setMonthlyConsumptionData(mappedMonthly);
-            // Set the calculated total consumption into state
+            // CORRECTED: Set the calculated total consumption into state
             setTotalConsumption(totalConsumptionCalc);
 
         } catch (error) {
@@ -240,7 +244,7 @@ const App = () => {
     const statusCards = currentInfo ? [
         <StatusCard key="mode" label="Mode" value={currentInfo.Mode === 0 ? 'Standby' : currentInfo.Mode === 1 ? 'Auto' : 'Timer'} icon={Clock} />,
         <StatusCard key="state" label="State" value={currentInfo.State === 0 ? 'CH Priority' : currentInfo.State === 1 ? 'DHW Priority' : currentInfo.State === 2 ? 'Parallel Pumps' : 'Summer Mode'} icon={Gauge} />,
-        // Power level now subtracts 1 to match the graph's logic
+        // CORRECTED: Power level now subtracts 1 to match the graph's logic
         <StatusCard key="status" label="Status" value={(currentInfo.Status === 0 ? 'Idle' : currentInfo.Status === 1 ? 'Fan Cleaning' : currentInfo.Status === 2 ? 'Cleaner' : currentInfo.Status === 3 ? 'Wait' : currentInfo.Status === 4 ? 'Loading' : currentInfo.Status === 5 ? 'Heating' : currentInfo.Status === 6 ? 'Ignition1' : currentInfo.Status === 7 ? 'Ignition2' : currentInfo.Status === 8 ? 'Unfolding' : currentInfo.Status === 9 ? 'Burning' : currentInfo.Status === 10 ? 'Extinction' : 'Standby/Extinct') + (currentInfo.Power > 0 ? ` / P${currentInfo.Power - 1}` : '')} icon={Flame} />,
         <StatusCard key="flame" label="Flame" value={`${currentInfo.Flame} lx`} icon={Flame} />,
         <StatusCard key="fan" label="Fan %" value={`${currentInfo.Fan} %`} icon={Fan} />,
@@ -249,7 +253,7 @@ const App = () => {
         <StatusCard key="toutside" label="Toutside" value={`${currentInfo.TBMP} °C`} icon={Thermometer} />,
         <StatusCard key="chpump" label="CH Pump" value={currentInfo.CHPump === false ? 'Off' : 'On'} icon={Droplet} />,
         <StatusCard key="dhwpump" label="DHW Pump" value={currentInfo.DHWPump === false ? 'Off' : 'On'} icon={Droplet} />,
-        // Label is now dynamic and value uses the calculated totalConsumption
+        // CORRECTED: Label is now dynamic and value uses the calculated totalConsumption
         <StatusCard key="consumption" label={`Consumption / ${timeRangeCardLabel}`} value={`${totalConsumption.toFixed(2)} kg`} icon={CalendarDays} />
     ] : [];
 
@@ -330,7 +334,8 @@ const App = () => {
                         </div>
                     </div>
                     <div className="bg-white dark:bg-gray-800/50 p-6 rounded-2xl shadow-lg">
-                        <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-4">Consumption Last 24 hours</h2>
+                        {/* CORRECTED: Title is now dynamic */}
+                        <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-4">Consumption {timeRangeLabel}</h2>
                         <div className="w-full h-64">
                             {consumptionData.length > 0 ? (
                                 <ResponsiveContainer width="100%" height="100%">
