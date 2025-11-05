@@ -20,8 +20,7 @@ const fetchDataWithRetry = async (url) => {
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
-            const data = await response.json();
-            return data;
+            return await response.json();
         } catch (error) {
             console.error(`Attempt ${i + 1} failed for ${url}:`, error);
             if (i < MAX_RETRIES - 1) {
@@ -33,9 +32,7 @@ const fetchDataWithRetry = async (url) => {
     }
 };
 
-// Main App component
 const App = () => {
-    // State hooks for data and UI state
     const [currentInfo, setCurrentInfo] = useState(null);
     const [statsData, setStatsData] = useState([]);
     const [consumptionData, setConsumptionData] = useState([]);
@@ -44,10 +41,9 @@ const App = () => {
     const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'dark');
     const [apiError, setApiError] = useState(false);
     const [errorMessage, setErrorMessage] = useState('');
-
-    // State for the selectable time range in hours, with 24 hours as the default
     const [timeRange, setTimeRange] = useState(24);
-
+    // ADDED: State to hold the calculated total consumption
+    const [totalConsumption, setTotalConsumption] = useState(0);
     const [lineVisibility, setLineVisibility] = useState({
         tSet: true,
         tBoiler: true,
@@ -77,7 +73,6 @@ const App = () => {
         try {
             setApiError(false);
             setErrorMessage('');
-
             const timestampAgo = Math.floor(Date.now() / 1000) - (timeRange * 60 * 60);
 
             const [
@@ -95,8 +90,7 @@ const App = () => {
             if (info && info.length > 0) {
                 setCurrentInfo(info[0]);
             }
-            
-            // CORRECTED: Using 'en-GB' locale for Day/Month date format
+
             const localeOptions = {
                 day: timeRange > 24 ? 'numeric' : undefined,
                 month: timeRange > 24 ? 'numeric' : undefined,
@@ -115,7 +109,6 @@ const App = () => {
                 tFlueGases: item.KTYPE,
                 tOutside: item.TBMP,
                 flame: item.Flame,
-                // CORRECTED: Ensure power is never negative. (0=Off, 1=Suspend -> 0 on graph)
                 power: Math.max(0, item.Power - 1),
             })) || [];
             
@@ -124,6 +117,9 @@ const App = () => {
                 formattedDate: new Date(item.Timestamp).toLocaleString('en-GB', localeOptions),
                 consumption: Math.round(item.FFWorkTime * feedTime * 100) / 100
             })) || [];
+
+            // Calculate the sum of all consumption values for the period
+            const totalConsumptionCalc = mappedConsumption.reduce((acc, cur) => acc + cur.consumption, 0);
             
             const mappedMonthly = monthlyConsumption?.map(item => {
                 if (!item.yr_mon || item.FFWork === undefined) return null;
@@ -141,6 +137,8 @@ const App = () => {
             setStatsData(mappedStats);
             setConsumptionData(mappedConsumption);
             setMonthlyConsumptionData(mappedMonthly);
+            // Set the calculated total consumption into state
+            setTotalConsumption(totalConsumptionCalc);
 
         } catch (error) {
             console.error("Error fetching data:", error);
@@ -192,7 +190,17 @@ const App = () => {
         48: '[last 2 days]',
         72: '[last 3 days]',
     }[timeRange];
-    
+
+    // ADDED: Simple label for the consumption card
+    const timeRangeCardLabel = {
+        1: '1h',
+        6: '6h',
+        12: '12h',
+        24: '24h',
+        48: '2d',
+        72: '3d',
+    }[timeRange];
+
     const TimeRangeSelector = () => {
         const ranges = [
             { label: '1 Hour', value: 1 },
@@ -232,7 +240,8 @@ const App = () => {
     const statusCards = currentInfo ? [
         <StatusCard key="mode" label="Mode" value={currentInfo.Mode === 0 ? 'Standby' : currentInfo.Mode === 1 ? 'Auto' : 'Timer'} icon={Clock} />,
         <StatusCard key="state" label="State" value={currentInfo.State === 0 ? 'CH Priority' : currentInfo.State === 1 ? 'DHW Priority' : currentInfo.State === 2 ? 'Parallel Pumps' : 'Summer Mode'} icon={Gauge} />,
-        <StatusCard key="status" label="Status" value={(currentInfo.Status === 0 ? 'Idle' : currentInfo.Status === 1 ? 'Fan Cleaning' : currentInfo.Status === 2 ? 'Cleaner' : currentInfo.Status === 3 ? 'Wait' : currentInfo.Status === 4 ? 'Loading' : currentInfo.Status === 5 ? 'Heating' : currentInfo.Status === 6 ? 'Ignition1' : currentInfo.Status === 7 ? 'Ignition2' : currentInfo.Status === 8 ? 'Unfolding' : currentInfo.Status === 9 ? 'Burning' : currentInfo.Status === 10 ? 'Extinction' : 'Standby/Extinct') + (currentInfo.Power > 0 ? ` / P${currentInfo.Power}` : '')} icon={Flame} />,
+        // Power level now subtracts 1 to match the graph's logic
+        <StatusCard key="status" label="Status" value={(currentInfo.Status === 0 ? 'Idle' : currentInfo.Status === 1 ? 'Fan Cleaning' : currentInfo.Status === 2 ? 'Cleaner' : currentInfo.Status === 3 ? 'Wait' : currentInfo.Status === 4 ? 'Loading' : currentInfo.Status === 5 ? 'Heating' : currentInfo.Status === 6 ? 'Ignition1' : currentInfo.Status === 7 ? 'Ignition2' : currentInfo.Status === 8 ? 'Unfolding' : currentInfo.Status === 9 ? 'Burning' : currentInfo.Status === 10 ? 'Extinction' : 'Standby/Extinct') + (currentInfo.Power > 0 ? ` / P${currentInfo.Power - 1}` : '')} icon={Flame} />,
         <StatusCard key="flame" label="Flame" value={`${currentInfo.Flame} lx`} icon={Flame} />,
         <StatusCard key="fan" label="Fan %" value={`${currentInfo.Fan} %`} icon={Fan} />,
         <StatusCard key="tboiler" label="TBoiler" value={`${currentInfo.Tboiler} °C`} icon={Thermometer} />,
@@ -240,7 +249,8 @@ const App = () => {
         <StatusCard key="toutside" label="Toutside" value={`${currentInfo.TBMP} °C`} icon={Thermometer} />,
         <StatusCard key="chpump" label="CH Pump" value={currentInfo.CHPump === false ? 'Off' : 'On'} icon={Droplet} />,
         <StatusCard key="dhwpump" label="DHW Pump" value={currentInfo.DHWPump === false ? 'Off' : 'On'} icon={Droplet} />,
-        <StatusCard key="consumption" label="Consumption" value={`${consumptionData.length > 0 ? consumptionData[consumptionData.length - 1].consumption.toFixed(2) : '0.00'} kg / 24h`} icon={CalendarDays} />
+        // Label is now dynamic and value uses the calculated totalConsumption
+        <StatusCard key="consumption" label={`Consumption / ${timeRangeCardLabel}`} value={`${totalConsumption.toFixed(2)} kg`} icon={CalendarDays} />
     ] : [];
 
     return (
@@ -289,7 +299,6 @@ const App = () => {
                                         <Line type="monotone" dataKey="tBoiler" name="Tboiler(out)" stroke="#ef4444" dot={false} hide={!lineVisibility.tBoiler} />
                                         <Line type="monotone" dataKey="tRetWater" name="Tboiler(in)" stroke="#3b82f6" dot={false} hide={!lineVisibility.tRetWater} />
                                         <Line type="monotone" dataKey="dhw" name="DHW" stroke="#06b6d4" dot={false} hide={!lineVisibility.dhw} />
-                                        {/* CORRECTED: Changed stroke color for better visibility */}
                                         <Line type="monotone" dataKey="tFlueGases" name="TFlueGases" stroke="#6c7d52" dot={false} hide={!lineVisibility.tFlueGases} />
                                         <Line type="monotone" dataKey="tOutside" name="Toutside" stroke="#eab308" dot={false} hide={!lineVisibility.tOutside} />
                                     </LineChart>
@@ -321,7 +330,7 @@ const App = () => {
                         </div>
                     </div>
                     <div className="bg-white dark:bg-gray-800/50 p-6 rounded-2xl shadow-lg">
-                        <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-4">Consumption {timeRangeLabel}</h2>
+                        <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-4">Consumption Last 24 hours</h2>
                         <div className="w-full h-64">
                             {consumptionData.length > 0 ? (
                                 <ResponsiveContainer width="100%" height="100%">
