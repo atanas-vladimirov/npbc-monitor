@@ -241,11 +241,27 @@ const App = () => {
         );
     }
     
+    // Helper function to determine the complex status card value
+    const getStatusValue = (info) => {
+        // Special case: "Burning" (9) at Power 1 (which is P0/Suspend) should show "Suspend"
+        if (info.Status === 9 && info.Power === 1) {
+            return "Suspend";
+        }
+
+        // Default Status text
+        const statusText = (info.Status === 0 ? 'Idle' : info.Status === 1 ? 'Fan Cleaning' : info.Status === 2 ? 'Cleaner' : info.Status === 3 ? 'Wait' : info.Status === 4 ? 'Loading' : info.Status === 5 ? 'Heating' : info.Status === 6 ? 'Ignition1' : info.Status === 7 ? 'Ignition2' : info.Status === 8 ? 'Unfolding' : info.Status === 9 ? 'Burning' : info.Status === 10 ? 'Extinction' : 'Standby/Extinct');
+
+        // Power level text (only show for P1 and up, which is info.Power > 1)
+        const powerText = (info.Power > 1 ? ` / P${info.Power - 1}` : '');
+
+        return statusText + powerText;
+    };
+
     const statusCards = currentInfo ? [
         <StatusCard key="mode" label="Mode" value={currentInfo.Mode === 0 ? 'Standby' : currentInfo.Mode === 1 ? 'Auto' : 'Timer'} icon={Clock} />,
         <StatusCard key="state" label="State" value={currentInfo.State === 0 ? 'CH Priority' : currentInfo.State === 1 ? 'DHW Priority' : currentInfo.State === 2 ? 'Parallel Pumps' : 'Summer Mode'} icon={Gauge} />,
-        // CORRECTED: Power level now subtracts 1 to match the graph's logic
-        <StatusCard key="status" label="Status" value={(currentInfo.Status === 0 ? 'Idle' : currentInfo.Status === 1 ? 'Fan Cleaning' : currentInfo.Status === 2 ? 'Cleaner' : currentInfo.Status === 3 ? 'Wait' : currentInfo.Status === 4 ? 'Loading' : currentInfo.Status === 5 ? 'Heating' : currentInfo.Status === 6 ? 'Ignition1' : currentInfo.Status === 7 ? 'Ignition2' : currentInfo.Status === 8 ? 'Unfolding' : currentInfo.Status === 9 ? 'Burning' : currentInfo.Status === 10 ? 'Extinction' : 'Standby/Extinct') + (currentInfo.Power > 0 ? ` / P${currentInfo.Power - 1}` : '')} icon={Flame} />,
+        // Use the new helper function to determine the complex status value
+        <StatusCard key="status" label="Status" value={getStatusValue(currentInfo)} icon={Flame} />,
         <StatusCard key="flame" label="Flame" value={`${currentInfo.Flame} lx`} icon={Flame} />,
         <StatusCard key="fan" label="Fan %" value={`${currentInfo.Fan} %`} icon={Fan} />,
         <StatusCard key="tboiler" label="TBoiler" value={`${currentInfo.Tboiler} °C`} icon={Thermometer} />,
@@ -253,7 +269,7 @@ const App = () => {
         <StatusCard key="toutside" label="Toutside" value={`${currentInfo.TBMP} °C`} icon={Thermometer} />,
         <StatusCard key="chpump" label="CH Pump" value={currentInfo.CHPump === false ? 'Off' : 'On'} icon={Droplet} />,
         <StatusCard key="dhwpump" label="DHW Pump" value={currentInfo.DHWPump === false ? 'Off' : 'On'} icon={Droplet} />,
-        // CORRECTED: Label is now dynamic and value uses the calculated totalConsumption
+        // Label is now dynamic and value uses the calculated totalConsumption
         <StatusCard key="consumption" label={`Consumption / ${timeRangeCardLabel}`} value={`${totalConsumption.toFixed(2)} kg`} icon={CalendarDays} />
     ] : [];
 
