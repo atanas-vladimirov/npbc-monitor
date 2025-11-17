@@ -19,7 +19,27 @@ import psycopg2
 import psycopg2.extras
 
 # --- Configuration ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+LOG_FILE = '/var/log/npbc_monitor.log'  # Define the log file path
+
+# Set up file logging
+file_handler = logging.FileHandler(LOG_FILE)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Get the root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Clear existing handlers (like the default StreamHandler to console)
+if root_logger.hasHandlers():
+    root_logger.handlers.clear()
+
+# Add the file handler
+root_logger.addHandler(file_handler)
+
+logging.info("Logging initialized to file.")
+# Optionally, if you want Tornado messages to go to the file as well:
+logging.getLogger('tornado.access').addHandler(file_handler)
+logging.getLogger('tornado.application').addHandler(file_handler)
 
 # Define command line options for server and database configuration
 define("port", default=8088, help="run on the given port", type=int)
@@ -108,7 +128,10 @@ class LogDataHandler(BaseHandler):
     def post(self):
         try:
             data = tornado.escape.json_decode(self.request.body)
+            #print("--- The data ---")
+            #print(data)
 
+            # Map TINYINT (0/1) from original data to BOOLEAN for PostgreSQL
             params = [
                 datetime.now(), data["SwVer"], data["Date"], data["Mode"], data["State"], data["Status"],
                 bool(data["IgnitionFail"]), bool(data["PelletJam"]), data["Tset"], data["Tboiler"],
@@ -117,6 +140,8 @@ class LogDataHandler(BaseHandler):
                 bool(data["ThermostatStop"]), data["FFWorkTime"], data["TDS18"], data["TBMP"],
                 data["PBMP"], data["KTYPE"]
             ]
+            #print("--- The params --- ")
+            #print(params)
 
             query = """
                 INSERT INTO "BurnerLogs" (
@@ -127,15 +152,15 @@ class LogDataHandler(BaseHandler):
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
             """
-            
+
             conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute(query, params)
                 conn.commit()
-            
+
             self.set_status(200)
             self.write({"message": "Log received successfully."})
-            
+
         except (json.JSONDecodeError, KeyError) as e:
             self.set_status(400)
             self.write({"error": f"Invalid or missing data in request: {e}"})
@@ -194,10 +219,10 @@ class GetStatsHandler(BaseHandler):
                  return
         else:
             where_clauses.append("\"Date\" >= NOW() - INTERVAL '24 hours'")
-        
+
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
-        
+
         # FIX: Add pagination to the query to prevent MemoryError
         query += ' ORDER BY "Date" ASC LIMIT %s OFFSET %s'
         params.extend([limit, offset])
@@ -220,7 +245,7 @@ class GetStatsHandler(BaseHandler):
 
 class GetConsumptionByMonthHandler(BaseHandler):
     def get(self):
-        
+
         query = """
             SELECT to_char(date_trunc('month', "Timestamp"), 'YYYY-MM') AS yr_mon, SUM("FFWorkTime") as "FFWork"
             FROM "BurnerLogs"
@@ -272,7 +297,6 @@ class GetConsumptionStatsHandler(BaseHandler):
         conn.close()
         self.write(json.dumps(result, default=str))
 
-
 def make_app():
     """Creates the Tornado web application and defines URL routing."""
     REACT_BUILD_PATH = os.path.join(os.path.dirname(__file__))
@@ -295,7 +319,7 @@ def make_app():
 def main():
     """Main function to parse arguments and start the server."""
     tornado.options.parse_command_line()
-    
+
     if options.init_db:
         initialize_database()
         return
@@ -309,11 +333,11 @@ def main():
     app = make_app()
     http_server = tornado.httpserver.HTTPServer(app)
     http_server.listen(options.port)
-    
+
     logging.info(f"Server is running on http://localhost:{options.port}")
     logging.info("To initialize the database, run with --init_db=true")
     logging.info("Press Ctrl+C to stop the server.")
-    
+
     tornado.ioloop.IOLoop.current().start()
 
 if __name__ == "__main__":

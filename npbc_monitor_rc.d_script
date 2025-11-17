@@ -1,0 +1,23 @@
+#!/bin/ksh
+
+# --- Set paths ---
+_app_dir="/var/www/npbc_monitor"
+_app_script="${_app_dir}/npbc_monitor.py"
+_python_bin="/usr/local/bin/python3" 
+
+# --- Daemon settings ---
+daemon="${_python_bin} ${_app_script} ${daemon_flags}"
+daemon_user="www"
+
+rc_bg=YES
+rc_reload=NO
+
+. /etc/rc.d/rc.subr
+
+pexp="${_python_bin} ${_app_script}.*" 
+
+rc_pre() {
+    cd ${_app_dir}
+}
+
+rc_cmd $1
