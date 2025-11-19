@@ -37,9 +37,6 @@ if root_logger.hasHandlers():
 root_logger.addHandler(file_handler)
 
 logging.info("Logging initialized to file.")
-# Optionally, if you want Tornado messages to go to the file as well:
-logging.getLogger('tornado.access').addHandler(file_handler)
-logging.getLogger('tornado.application').addHandler(file_handler)
 
 # Define command line options for server and database configuration
 define("port", default=8088, help="run on the given port", type=int)
@@ -47,7 +44,7 @@ define("db_host", default="localhost", help="PostgreSQL database host")
 define("db_port", default=5432, help="PostgreSQL database port")
 define("db_name", default="npbc_db", help="PostgreSQL database name")
 define("db_user", default="npbc_user", help="PostgreSQL database user")
-define("db_password", default="mTKgIi0HCCTiUKF", help="PostgreSQL database password")
+define("db_password", default=None, help="PostgreSQL database password")
 define("init_db", default=False, help="Initialize the database schema", type=bool)
 
 # --- Database Utilities ---
@@ -115,9 +112,6 @@ class BaseHandler(tornado.web.RequestHandler):
     """Base handler to set common headers."""
     def set_default_headers(self):
         self.set_header("Content-Type", 'application/json; charset="utf-8"')
-        self.set_header("Access-Control-Allow-Origin", "*")
-        self.set_header("Access-Control-Allow-Headers", "content-type")
-        self.set_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
 
     def options(self, *args):
         self.set_status(204)
@@ -191,6 +185,7 @@ class GetStatsHandler(BaseHandler):
         timestamp_arg = self.get_argument('timestamp', None)
         try:
             limit = int(self.get_argument('limit', '7000'))
+            if limit > 10000: limit = 10000
             page = int(self.get_argument('page', '1'))
         except ValueError:
             self.set_status(400)
@@ -313,7 +308,7 @@ def make_app():
             }),
         ],
         static_path=os.path.join(REACT_BUILD_PATH, "static"),
-        debug=True,
+        debug=False,
     )
 
 def main():
@@ -331,7 +326,7 @@ def main():
     logging.info("Database connection successful.")
 
     app = make_app()
-    http_server = tornado.httpserver.HTTPServer(app)
+    http_server = tornado.httpserver.HTTPServer(app, xheaders=True)
     http_server.listen(options.port)
 
     logging.info(f"Server is running on http://localhost:{options.port}")
