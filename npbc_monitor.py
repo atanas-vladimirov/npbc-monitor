@@ -3,70 +3,101 @@
 import os
 import sys
 import time
-import json
 import logging
+import logging.handlers
+import argparse
+import uvicorn
 from datetime import datetime
+from typing import Optional
 
-# --- Tornado Imports ---
-import tornado.ioloop
-import tornado.web
-import tornado.httpserver
-import tornado.escape
-from tornado.options import define, options
+# --- FastAPI Imports ---
+from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 # --- Database Imports ---
 import psycopg2
 import psycopg2.extras
 
 # --- Configuration ---
-LOG_FILE = '/var/log/npbc_monitor.log'  # Define the log file path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = '/var/log/npbc_monitor.log'
 
-# Set up file logging
-file_handler = logging.FileHandler(LOG_FILE)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+# --- Pydantic Models ---
+class BurnerLogSchema(BaseModel):
+    SwVer: str
+    Date: str
+    Mode: int
+    State: int
+    Status: int
+    IgnitionFail: bool
+    PelletJam: bool
+    Tset: int
+    Tboiler: int
+    Flame: int
+    Heater: bool
+    DHW: int
+    DHWPump: bool
+    CHPump: bool
+    BF: bool
+    FF: bool
+    Fan: int
+    Power: int
+    ThermostatStop: bool
+    FFWorkTime: int
+    TDS18: float
+    TBMP: float
+    PBMP: float
+    KTYPE: float
 
-# Get the root logger
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
+# --- Logging Setup ---
 
-# Clear existing handlers (like the default StreamHandler to console)
-if root_logger.hasHandlers():
-    root_logger.handlers.clear()
+class SafeIPFormatter(logging.Formatter):
+    """
+    Ensures 'client_ip' exists in every log record.
+    Defaults to '-' for system messages.
+    """
+    def format(self, record):
+        if not hasattr(record, 'client_ip'):
+            record.client_ip = "-"
+        return super().format(record)
 
-# Add the file handler
-root_logger.addHandler(file_handler)
+def setup_logging():
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
 
-logging.info("Logging initialized to file.")
+    # Format: Date Time - IP - Level - Message
+    log_fmt = '%(asctime)s - %(client_ip)s - %(levelname)s - %(message)s'
+    date_fmt = '%Y-%m-%d %H:%M:%S'
 
-# Define command line options for server and database configuration
-define("port", default=8088, help="run on the given port", type=int)
-define("db_host", default="localhost", help="PostgreSQL database host")
-define("db_port", default=5432, help="PostgreSQL database port")
-define("db_name", default="npbc_db", help="PostgreSQL database name")
-define("db_user", default="npbc_user", help="PostgreSQL database user")
-define("db_password", default=None, help="PostgreSQL database password")
-define("init_db", default=False, help="Initialize the database schema", type=bool)
+    formatter = SafeIPFormatter(log_fmt, datefmt=date_fmt)
+    file_handler = logging.handlers.WatchedFileHandler(LOG_FILE)
+    file_handler.setFormatter(formatter)
+
+    # Clear existing handlers to avoid duplication
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+    root_logger.addHandler(file_handler)
 
 # --- Database Utilities ---
 
-def get_db_connection():
-    """Establishes and returns a connection to the PostgreSQL database."""
+def get_db_connection(args):
     try:
         conn = psycopg2.connect(
-            host=options.db_host,
-            port=options.db_port,
-            dbname=options.db_name,
-            user=options.db_user,
-            password=options.db_password
+            host=args.db_host,
+            port=args.db_port,
+            dbname=args.db_name,
+            user=args.db_user,
+            password=args.db_password
         )
         return conn
     except psycopg2.OperationalError as e:
-        logging.error(f"Could not connect to PostgreSQL database: {e}")
+        logging.error(f"Could not connect to DB: {e}")
         sys.exit(1)
 
-def initialize_database():
-    """Creates the BurnerLogs table in the PostgreSQL database if it doesn't exist."""
-    conn = get_db_connection()
+def initialize_database(args):
+    conn = get_db_connection(args)
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -99,45 +130,58 @@ def initialize_database():
                 )
             """)
             conn.commit()
-            logging.info("Database initialized successfully. 'BurnerLogs' table is ready.")
+            logging.info("Database initialized.")
     except Exception as e:
-        logging.error(f"Database initialization failed: {e}")
+        logging.error(f"DB Init failed: {e}")
         conn.rollback()
     finally:
         conn.close()
 
-# --- Tornado Request Handlers ---
+# --- FastAPI App Setup ---
 
-class BaseHandler(tornado.web.RequestHandler):
-    """Base handler to set common headers."""
-    def set_default_headers(self):
-        self.set_header("Content-Type", 'application/json; charset="utf-8"')
+app = FastAPI(docs_url=None, redoc_url=None)
+app_args = None
 
-    def options(self, *args):
-        self.set_status(204)
-        self.finish()
+# --- Middleware: The Single Logger ---
+@app.middleware("http")
+async def custom_logging_middleware(request: Request, call_next):
+    start_time = time.time()
 
-class LogDataHandler(BaseHandler):
-    """Handles incoming log data, replacing the old server.py."""
-    def post(self):
-        try:
-            data = tornado.escape.json_decode(self.request.body)
-            #print("--- The data ---")
-            #print(data)
+    response = await call_next(request)
 
-            # Map TINYINT (0/1) from original data to BOOLEAN for PostgreSQL
-            params = [
-                datetime.now(), data["SwVer"], data["Date"], data["Mode"], data["State"], data["Status"],
-                bool(data["IgnitionFail"]), bool(data["PelletJam"]), data["Tset"], data["Tboiler"],
-                data["Flame"], bool(data["Heater"]), bool(data["DHWPump"]), bool(data["CHPump"]),
-                data["DHW"], bool(data["BF"]), bool(data["FF"]), data["Fan"], data["Power"],
-                bool(data["ThermostatStop"]), data["FFWorkTime"], data["TDS18"], data["TBMP"],
-                data["PBMP"], data["KTYPE"]
-            ]
-            #print("--- The params --- ")
-            #print(params)
+    process_time = (time.time() - start_time) * 1000
 
-            query = """
+    # Get IP (Handling Nginx Proxy Headers)
+    client_ip = request.headers.get("x-real-ip") or request.client.host
+
+    # Log Format: "HTTP_Status Method URL Duration"
+    # Example: 200 POST /api/logData 43.11ms
+    msg = "%d %s %s %.2fms" % (
+        response.status_code,
+        request.method,
+        request.url.path,
+        process_time
+    )
+
+    if response.status_code < 400:
+        level = logging.INFO
+    elif response.status_code < 500:
+        level = logging.WARNING
+    else:
+        level = logging.ERROR
+
+    logging.getLogger().log(level, msg, extra={'client_ip': client_ip})
+
+    return response
+
+# --- API Routes ---
+
+@app.post("/api/logData")
+def log_data(data: BurnerLogSchema):
+    try:
+        conn = get_db_connection(app_args)
+        with conn.cursor() as cur:
+            cur.execute("""
                 INSERT INTO "BurnerLogs" (
                     "Timestamp", "SwVer", "Date", "Mode", "State", "Status", "IgnitionFail", "PelletJam",
                     "Tset", "Tboiler", "Flame", "Heater", "DHWPump", "CHPump", "DHW", "BF", "FF", "Fan",
@@ -145,137 +189,108 @@ class LogDataHandler(BaseHandler):
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
-            """
+            """, (
+                datetime.now(), data.SwVer, data.Date, data.Mode, data.State, data.Status,
+                data.IgnitionFail, data.PelletJam, data.Tset, data.Tboiler,
+                data.Flame, data.Heater, data.DHWPump, data.CHPump,
+                data.DHW, data.BF, data.FF, data.Fan, data.Power,
+                data.ThermostatStop, data.FFWorkTime, data.TDS18, data.TBMP,
+                data.PBMP, data.KTYPE
+            ))
+            conn.commit()
+        conn.close()
+        return {"message": "OK"}
+    except Exception as e:
+        logging.error(f"Error logging data: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                cur.execute(query, params)
-                conn.commit()
-
-            self.set_status(200)
-            self.write({"message": "Log received successfully."})
-
-        except (json.JSONDecodeError, KeyError) as e:
-            self.set_status(400)
-            self.write({"error": f"Invalid or missing data in request: {e}"})
-        except Exception as e:
-            logging.error(f"Error logging data: {e}")
-            self.set_status(500)
-            self.write({"error": "Internal server error while logging data."})
-        finally:
-            if 'conn' in locals() and conn:
-                conn.close()
-
-class GetInfoHandler(BaseHandler):
-    def get(self):
-        query = """
+@app.get("/api/getInfo")
+def get_info():
+    conn = get_db_connection(app_args)
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("""
             SELECT "SwVer", "Power", "Flame", "Tset", "Tboiler", "State", "Status", "DHW", "Fan", "DHWPump", "CHPump", "Mode", "TBMP"
             FROM "BurnerLogs" WHERE "Timestamp" >= NOW() - INTERVAL '1 minute'
             ORDER BY "Date" DESC LIMIT 1
-        """
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(query)
-            result = [dict(row) for row in cur.fetchall()]
-        conn.close()
-        self.write(json.dumps(result, default=str))
+        """)
+        result = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return result
 
-class GetStatsHandler(BaseHandler):
-    def get(self):
-        timestamp_arg = self.get_argument('timestamp', None)
+@app.get("/api/getStats")
+def get_stats(timestamp: Optional[str] = None, limit: int = 7000, page: int = 1):
+    if limit > 10000: limit = 10000
+    offset = (page - 1) * limit
+
+    query = """
+        SELECT to_char("Timestamp", 'YYYY-MM-DD"T"HH24:MI:SS') AS "Date",
+               "Power", "Flame", "Tset", "Tboiler", "DHW", "ThermostatStop", "TDS18", "KTYPE", "TBMP"
+        FROM "BurnerLogs"
+    """
+    params = []
+    where_clauses = []
+
+    if timestamp and timestamp != "null":
         try:
-            limit = int(self.get_argument('limit', '7000'))
-            if limit > 10000: limit = 10000
-            page = int(self.get_argument('page', '1'))
+            ts = datetime.fromtimestamp(float(timestamp))
+            where_clauses.append('"Date" >= %s')
+            params.append(ts)
         except ValueError:
-            self.set_status(400)
-            self.write({"error": "Invalid 'limit' or 'page' parameter. Must be an integer."})
-            return
+             raise HTTPException(status_code=400, detail="Invalid timestamp")
+    else:
+        where_clauses.append("\"Date\" >= NOW() - INTERVAL '24 hours'")
 
-        offset = (page - 1) * limit
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
 
-        query = """
-            SELECT to_char("Timestamp", 'YYYY-MM-DD"T"HH24:MI:SS') AS "Date",
-                   "Power", "Flame", "Tset", "Tboiler", "DHW", "ThermostatStop", "TDS18", "KTYPE", "TBMP"
-            FROM "BurnerLogs"
-        """
-        params = []
-        where_clauses = []
+    query += ' ORDER BY "Date" ASC LIMIT %s OFFSET %s'
+    params.extend([limit, offset])
 
-        if timestamp_arg and timestamp_arg != "null":
-            try:
-                # FIX: Convert Unix timestamp (seconds) to datetime object
-                ts = datetime.fromtimestamp(float(timestamp_arg))
-                where_clauses.append('"Date" >= %s')
-                params.append(ts)
-            except ValueError:
-                 self.set_status(400)
-                 self.write({"error": "Invalid timestamp format."})
-                 return
-        else:
-            where_clauses.append("\"Date\" >= NOW() - INTERVAL '24 hours'")
+    conn = get_db_connection(app_args)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(query, params)
+            result = [dict(row) for row in cur.fetchall()]
+        return result
+    finally:
+        conn.close()
 
-        if where_clauses:
-            query += " WHERE " + " AND ".join(where_clauses)
-
-        # FIX: Add pagination to the query to prevent MemoryError
-        query += ' ORDER BY "Date" ASC LIMIT %s OFFSET %s'
-        params.extend([limit, offset])
-
-        conn = get_db_connection()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                cur.execute(query, params)
-                # fetchall() is now safe because of the LIMIT clause
-                result = [dict(row) for row in cur.fetchall()]
-            self.write(json.dumps(result, default=str))
-        except Exception as e:
-            logging.error(f"Error fetching stats: {e}")
-            self.set_status(500)
-            self.write({"error": "Internal server error while fetching stats."})
-        finally:
-            if conn:
-                conn.close()
-
-
-class GetConsumptionByMonthHandler(BaseHandler):
-    def get(self):
-
-        query = """
+@app.get("/api/getConsumptionByMonth")
+def get_consumption_by_month():
+    conn = get_db_connection(app_args)
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("""
             SELECT to_char(date_trunc('month', "Timestamp"), 'YYYY-MM') AS yr_mon, SUM("FFWorkTime") as "FFWork"
             FROM "BurnerLogs"
             WHERE "Timestamp" >= NOW() - INTERVAL '1 year'
             GROUP BY date_trunc('month', "Timestamp")
             ORDER BY date_trunc('month', "Timestamp");
-        """
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(query)
-            result = [dict(row) for row in cur.fetchall()]
-        conn.close()
+        """)
+        result = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return result
 
-        self.write(json.dumps(result, default=str))
+@app.get("/api/getConsumptionStats")
+def get_consumption_stats(timestamp: Optional[str] = None):
+    try:
+        if timestamp:
+            timestamp_sec = int(timestamp)
+        else:
+             timestamp_sec = int((datetime.now().timestamp()) - (24 * 3600))
+    except ValueError:
+         timestamp_sec = int((datetime.now().timestamp()) - (24 * 3600))
 
+    start_time = datetime.fromtimestamp(timestamp_sec)
 
-class GetConsumptionStatsHandler(BaseHandler):
-    def get(self):
-        try:
-            # Get the 'timestamp' argument from the URL (e.g., ?timestamp=1678886400)
-            timestamp_sec = int(self.get_argument('timestamp'))
-        except (ValueError, TypeError, tornado.web.MissingArgumentError):
-            # Fallback to 24 hours ago if the parameter is missing or invalid
-            timestamp_sec = int((datetime.now() - datetime.timedelta(hours=24)).timestamp())
-
-        start_time = datetime.fromtimestamp(timestamp_sec)
-
-        # We replace the hard-coded '24 hours' with a placeholder (%s)
-        query = """
+    conn = get_db_connection(app_args)
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("""
             SELECT
                 to_char(hour_bucket, 'YYYY-MM-DD"T"HH24:MI:SS') as "Timestamp",
                 COALESCE(SUM(bl."FFWorkTime"), 0) as "FFWorkTime"
             FROM
                 generate_series(
-                    date_trunc('hour', %s::timestamp),  -- <-- CHANGED: Use the placeholder
+                    date_trunc('hour', %s::timestamp),
                     date_trunc('hour', NOW()),
                     '1 hour'
                 ) AS hour_bucket
@@ -283,57 +298,75 @@ class GetConsumptionStatsHandler(BaseHandler):
                 ON bl."Timestamp" >= hour_bucket AND bl."Timestamp" < hour_bucket + interval '1 hour'
             GROUP BY hour_bucket
             ORDER BY hour_bucket;
-        """
-
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(query, (start_time,))
-            result = [dict(row) for row in cur.fetchall()]
-        conn.close()
-        self.write(json.dumps(result, default=str))
-
-def make_app():
-    """Creates the Tornado web application and defines URL routing."""
-    REACT_BUILD_PATH = os.path.join(os.path.dirname(__file__))
-    return tornado.web.Application(
-        [
-            (r"/api/logData", LogDataHandler), # New endpoint for logging
-            (r"/api/getInfo", GetInfoHandler),
-            (r"/api/getStats", GetStatsHandler),
-            (r"/api/getConsumptionStats", GetConsumptionStatsHandler),
-            (r"/api/getConsumptionByMonth", GetConsumptionByMonthHandler),
-            (r"/(.*)", tornado.web.StaticFileHandler, {
-                "path": REACT_BUILD_PATH,
-                "default_filename": "index.html"
-            }),
-        ],
-        static_path=os.path.join(REACT_BUILD_PATH, "static"),
-        debug=False,
-    )
-
-def main():
-    """Main function to parse arguments and start the server."""
-    tornado.options.parse_command_line()
-
-    if options.init_db:
-        initialize_database()
-        return
-
-    # Test DB connection on startup
-    logging.info("Attempting to connect to the database...")
-    conn = get_db_connection()
+        """, (start_time,))
+        result = [dict(row) for row in cur.fetchall()]
     conn.close()
-    logging.info("Database connection successful.")
+    return result
 
-    app = make_app()
-    http_server = tornado.httpserver.HTTPServer(app, xheaders=True)
-    http_server.listen(options.port)
+# --- Static Files & Routing ---
 
-    logging.info(f"Server is running on http://localhost:{options.port}")
-    logging.info("To initialize the database, run with --init_db=true")
-    logging.info("Press Ctrl+C to stop the server.")
+# 1. Mount static folder
+static_dir = os.path.join(BASE_DIR, "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-    tornado.ioloop.IOLoop.current().start()
+@app.get("/")
+async def serve_root():
+    index_path = os.path.join(BASE_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return Response("Index not found", status_code=404)
+
+@app.get("/{file_name}")
+async def serve_root_files(file_name: str):
+    allowed = ["favicon.ico", "manifest.json", "robots.txt", "asset-manifest.json"]
+
+    if file_name in allowed or (file_name.startswith("logo") and file_name.endswith(".png")):
+        file_path = os.path.join(BASE_DIR, file_name)
+        if os.path.exists(file_path):
+            # Return correct media type for favicon
+            media_type = "image/x-icon" if file_name == "favicon.ico" else None
+            return FileResponse(file_path, media_type=media_type)
+
+    index_path = os.path.join(BASE_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+
+    return Response("Not Found", status_code=404)
+
+# --- Main Entry Point ---
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="NPBC Monitor Server")
+    parser.add_argument("--host", default="localhost")
+    parser.add_argument("--port", type=int, default=8088, help="Run on the given port")
+    parser.add_argument("--db_host", default="localhost")
+    parser.add_argument("--db_port", default=5432)
+    parser.add_argument("--db_name", default="npbc_db")
+    parser.add_argument("--db_user", default="npbc_user")
+    parser.add_argument("--db_password", default=None)
+    parser.add_argument("--init_db", type=bool, default=False)
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    main()
+    args = parse_arguments()
+    app_args = args
+
+    setup_logging()
+
+    if args.init_db:
+        initialize_database(args)
+        sys.exit(0)
+
+    logging.info(f"Script running from: {BASE_DIR}")
+    logging.info(f"Starting FastAPI on port {args.port}...")
+
+    # We rely entirely on our custom middleware for request logging.
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_config=None,
+        access_log=False,
+        forwarded_allow_ips="*"
+    )
