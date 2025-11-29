@@ -100,6 +100,7 @@ def initialize_database(args):
     conn = get_db_connection(args)
     try:
         with conn.cursor() as cur:
+            # 1. Create the main log table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS "BurnerLogs" (
                     "Timestamp" TIMESTAMP NOT NULL PRIMARY KEY,
@@ -129,11 +130,68 @@ def initialize_database(args):
                     "KTYPE" REAL NOT NULL
                 )
             """)
+
+            # 2. Create the summary cache table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS "MonthlyStats" (
+                    "Month" DATE NOT NULL PRIMARY KEY,
+                    "FFWorkTime" INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+
+            # 3. Seed/Backfill the cache
+            logging.info("Seeding MonthlyStats cache from existing logs...")
+            cur.execute("""
+                INSERT INTO "MonthlyStats" ("Month", "FFWorkTime")
+                SELECT date_trunc('month', "Timestamp")::date, SUM("FFWorkTime")
+                FROM "BurnerLogs"
+                WHERE "Timestamp" < date_trunc('month', NOW())
+                GROUP BY 1
+                ON CONFLICT ("Month") DO NOTHING
+            """)
+
             conn.commit()
             logging.info("Database initialized.")
+
     except Exception as e:
         logging.error(f"DB Init failed: {e}")
         conn.rollback()
+    finally:
+        conn.close()
+
+# Call this at startup or periodically
+def ensure_monthly_stats_up_to_date(conn_args):
+    """
+    Checks if the previous completed month exists in MonthlyStats.
+    If not, it calculates it from BurnerLogs and inserts it.
+    """
+    conn = get_db_connection(conn_args)
+    try:
+        with conn.cursor() as cur:
+            # 1. Determine the start of the current month and the previous month
+            cur.execute("SELECT date_trunc('month', NOW())::date, date_trunc('month', NOW() - INTERVAL '1 month')::date")
+            current_month_start, prev_month_start = cur.fetchone()
+
+            # 2. Check if previous month exists in Summary
+            cur.execute('SELECT 1 FROM "MonthlyStats" WHERE "Month" = %s', (prev_month_start,))
+            if cur.fetchone() is None:
+                logging.info(f"Caching stats for completed month: {prev_month_start}")
+
+                # Calculate and Insert (Atomic operation)
+                cur.execute("""
+                    INSERT INTO "MonthlyStats" ("Month", "FFWorkTime")
+                    SELECT date_trunc('month', "Timestamp")::date, SUM("FFWorkTime")
+                    FROM "BurnerLogs"
+                    WHERE "Timestamp" >= %s AND "Timestamp" < %s
+                    GROUP BY 1
+                    ON CONFLICT ("Month") DO NOTHING
+                """, (prev_month_start, current_month_start))
+
+                conn.commit()
+            else:
+                logging.debug("Monthly stats are up to date.")
+    except Exception as e:
+        logging.error(f"Failed to update monthly stats: {e}")
     finally:
         conn.close()
 
@@ -257,15 +315,27 @@ def get_stats(timestamp: Optional[str] = None, limit: int = 7000, page: int = 1)
 
 @app.get("/api/getConsumptionByMonth")
 def get_consumption_by_month():
+    # 1. First, ensure our cache is up to date (lazy check)
+    ensure_monthly_stats_up_to_date(app_args)
+
     conn = get_db_connection(app_args)
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute("""
+        # Combines the fast "MonthlyStats" table with a small query on "BurnerLogs"
+        # for ONLY the current month.
+        query = """
+            SELECT to_char("Month", 'YYYY-MM') AS yr_mon, "FFWorkTime" as "FFWork"
+            FROM "MonthlyStats"
+
+            UNION ALL
+
             SELECT to_char(date_trunc('month', "Timestamp"), 'YYYY-MM') AS yr_mon, SUM("FFWorkTime") as "FFWork"
             FROM "BurnerLogs"
-            WHERE "Timestamp" >= NOW() - INTERVAL '1 year'
+            WHERE "Timestamp" >= date_trunc('month', NOW())
             GROUP BY date_trunc('month', "Timestamp")
-            ORDER BY date_trunc('month', "Timestamp");
-        """)
+
+            ORDER BY yr_mon;
+        """
+        cur.execute(query)
         result = [dict(row) for row in cur.fetchall()]
     conn.close()
     return result
